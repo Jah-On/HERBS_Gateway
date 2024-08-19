@@ -8,6 +8,7 @@
 #include <unordered_map> // Performant hash table
 
 // Arduino Includes
+#include <float16.h>
 #include <timers.h>
 
 // External Includes
@@ -24,8 +25,11 @@
 #define LORA_FREQUENCY_US        905.2
 
 #define LORA_BANDWIDTH_7_8       7.8
+#define LORA_BANDWIDTH_20_8      20.8
 #define LORA_BANDWIDTH_62_5      62.5
 
+#define LORA_SPREADING_FACTOR_5  5
+#define LORA_SPREADING_FACTOR_6  6
 #define LORA_SPREADING_FACTOR_7  7
 #define LORA_SPREADING_FACTOR_8  8
 #define LORA_SPREADING_FACTOR_9  9
@@ -39,7 +43,6 @@
 #define LORA_CODING_RATE_4_8     8
 
 void createUuidFromU64(uint64_t raw);
-char U8ToChar(uint8_t val);
 
 using namespace std;
 
@@ -52,13 +55,21 @@ typedef struct PacketData {
 
 std::list<PacketData> recievedPackets = {};
 
-size_t recvCount = 0;
+size_t valid = 0;
+size_t packets = 0;
 
 WiFiClient client;
 
 Timer<2, millis> timer;
 
 unordered_map<uint64_t, String> peerUuids = {};
+
+const unordered_map<uint8_t, char> U8_AS_CHAR = {
+  {0x00, '0'}, {0x01, '1'}, {0x02, '2'}, {0x03, '3'},
+  {0x04, '4'}, {0x05, '5'}, {0x06, '6'}, {0x07, '7'},
+  {0x08, '8'}, {0x09, '9'}, {0x0A, 'a'}, {0x0B, 'b'},
+  {0x0C, 'c'}, {0x0D, 'd'}, {0x0E, 'e'}, {0x0F, 'f'}
+};
 
 void setup() {
 
@@ -71,8 +82,9 @@ void setup() {
   heltec_setup();
 
   // Setup display
-  display.setFont(ArialMT_Plain_16);
   display.clear();
+  display.setFont(ArialMT_Plain_16);
+  display.display();
 
   // Init functions
   if (!LoRaInit()) {
@@ -81,7 +93,7 @@ void setup() {
     return;
   }
 
-  delay(2000);
+  heltec_delay(2000);
 
   int wifiStatus = WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE);
 
@@ -172,10 +184,11 @@ void loop() {
 bool LoRaInit(){
   int16_t res = radio.begin(
     LORA_FREQUENCY_US,
-    LORA_BANDWIDTH_7_8,
-    LORA_SPREADING_FACTOR_8,
+    LORA_BANDWIDTH_20_8,
+    LORA_SPREADING_FACTOR_5,
     LORA_CODING_RATE_4_5
   );
+  radio.setRxBoostedGainMode(true);
 
   return res == 0;
 }
@@ -183,8 +196,9 @@ bool LoRaInit(){
 bool updateDisplay(void* cbData){
   display.clear();
 
-  display.drawString(0,  0, "IP: " + WiFi.localIP().toString());
-  display.drawString(0, 10, "Recved: " + String(recvCount));
+  display.drawString(0,  0, WiFi.localIP().toString());
+  display.drawString(0, 16, "Packets: " + String(packets));
+  display.drawString(0, 32, "Valid: " + String(valid));
 
   display.display();
 
@@ -192,13 +206,17 @@ bool updateDisplay(void* cbData){
 }
 
 void onRecieve(){
-  recvCount++;
+  packets++;
 
   PacketData rcvdPacket;
+
+  if (radio.getPacketLength() != sizeof(PacketData)) return;
 
   radio.readData((uint8_t*)&rcvdPacket, sizeof(PacketData));
 
   recievedPackets.push_back(rcvdPacket);
+
+  valid++;
 }
 
 void createUuidFromU64(uint64_t raw){
@@ -212,44 +230,7 @@ void createUuidFromU64(uint64_t raw){
     default:
       break;
     }
-    uuid[strIndex++] = U8ToChar((raw >> bitIndex) & 0xF);
+    uuid[strIndex++] = U8_AS_CHAR.at((raw >> bitIndex) & 0xF);
   }
   peerUuids.insert({raw, uuid});
-}
-
-char U8ToChar(uint8_t val){
-  switch (val) {
-  case 0x01:
-    return '1';
-  case 0x02:
-    return '2';
-  case 0x03:
-    return '3';
-  case 0x04:
-    return '4';
-  case 0x05:
-    return '5';
-  case 0x06:
-    return '6';
-  case 0x07:
-    return '7';
-  case 0x08:
-    return '8';
-  case 0x09:
-    return '9';
-  case 0x0A:
-    return 'a';
-  case 0x0B:
-    return 'b';
-  case 0x0C:
-    return 'c';
-  case 0x0D:
-    return 'd';
-  case 0x0E:
-    return 'e';
-  case 0x0F:
-    return 'f';
-  default:
-    return '0';
-  }
 }
