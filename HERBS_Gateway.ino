@@ -1,6 +1,6 @@
 // Comment out for actual use to save energy
 // Otherwise it will print useful info over serial
-// #define DEBUG 
+#define DEBUG 
 
 // STL Includes
 #include <chrono>        // Time related
@@ -14,6 +14,7 @@
 // External Includes
 #include <arduino-timer.h>
 #include <heltec_unofficial.h>
+#include <mbedtls/aes.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
 
@@ -48,10 +49,15 @@ using namespace std;
 
 typedef struct PacketData {
   uint64_t id;
-  int8_t   temperature; // Celcius
-  uint8_t  humidity;    // Percentage from 0 to 100
-  uint16_t preassure;   // Millibars
+  uint8_t  packetNumber;
+  int8_t   temperature;  // Celcius
+  uint8_t  humidity;     // Percentage from 0 to 100
+  uint16_t preassure;    // Millibars
+  float16  acoustics;    // Decibels
+  uint16_t hiveMass;     // Grams
 } PacketData;
+
+const size_t packetSize = sizeof(PacketData);
 
 std::list<PacketData> recievedPackets = {};
 
@@ -71,6 +77,8 @@ const unordered_map<uint8_t, char> U8_AS_CHAR = {
   {0x0C, 'c'}, {0x0D, 'd'}, {0x0E, 'e'}, {0x0F, 'f'}
 };
 
+esp_aes_context aesContext;
+
 void setup() {
 
 #if defined(DEBUG)
@@ -85,6 +93,12 @@ void setup() {
   display.clear();
   display.setFont(ArialMT_Plain_16);
   display.display();
+
+  // Init AES
+  esp_aes_init(&aesContext);
+  if (esp_aes_setkey(&aesContext, AES_KEY, 128)){
+    Serial.println("could not set key!");
+  }
 
   // Init functions
   if (!LoRaInit()) {
@@ -128,51 +142,53 @@ void loop() {
 
   PacketData packet = recievedPackets.front();
 
+  Serial.printf("Got packet: %d\n", packet.packetNumber);
+
   if (!peerUuids.contains(packet.id)){
     createUuidFromU64(packet.id);
   }
 
-  client.connect(HTTP_HOST, HTTP_PORT);
+  // client.connect(HTTP_HOST, HTTP_PORT);
 
-  client.printf("POST /%s HTTP/1.1\n", peerUuids.at(packet.id).c_str());
+  // client.printf("POST /%s HTTP/1.1\n", peerUuids.at(packet.id).c_str());
 
-  client.printf("Host: %s\n", HTTP_HOST);
-  client.println("Connection: close");
+  // client.printf("Host: %s\n", HTTP_HOST);
+  // client.println("Connection: close");
 
-  size_t len = 43;
+  // size_t len = 43;
 
-  len++;
-  int8_t absValue;
-  if (packet.temperature < 0){
-    len++;
-    absValue = -1 * packet.temperature;
-  } else {
-    absValue = packet.temperature;
-  }
-  for (int8_t comp = 10; comp < absValue; comp *= 10){
-    len++;
-  }
+  // len++;
+  // int8_t absValue;
+  // if (packet.temperature < 0){
+  //   len++;
+  //   absValue = -1 * packet.temperature;
+  // } else {
+  //   absValue = packet.temperature;
+  // }
+  // for (int8_t comp = 10; comp < absValue; comp *= 10){
+  //   len++;
+  // }
 
-  len++;
-  for (uint8_t comp = 10; comp < packet.humidity; comp *= 10){
-    len++;
-  }
+  // len++;
+  // for (uint8_t comp = 10; comp < packet.humidity; comp *= 10){
+  //   len++;
+  // }
 
-  len++;
-  for (uint16_t comp = 10; comp < packet.preassure; comp *= 10){
-    len++;
-  }
+  // len++;
+  // for (uint16_t comp = 10; comp < packet.preassure; comp *= 10){
+  //   len++;
+  // }
 
-  client.print("Content-Length: ");
-  client.println(len);
-  client.println();
+  // client.print("Content-Length: ");
+  // client.println(len);
+  // client.println();
 
-  // Send JSON to stream
-  client.print("{");
-  client.printf("\"temperature\": %d,", packet.temperature);
-  client.printf("\"humidity\": %d,",    packet.humidity);
-  client.printf("\"preassure\": %d",    packet.preassure);
-  client.print("}");
+  // // Send JSON to stream
+  // client.print("{");
+  // client.printf("\"temperature\": %d,", packet.temperature);
+  // client.printf("\"humidity\": %d,",    packet.humidity);
+  // client.printf("\"preassure\": %d",    packet.preassure);
+  // client.print("}");
 
   recievedPackets.pop_front();
 
@@ -206,13 +222,24 @@ bool updateDisplay(void* cbData){
 }
 
 void onRecieve(){
+  uint8_t encryptedBuffer[packetSize];
+
+  // if (radio.getPacketLength() != packetSize) return;
+
   packets++;
+
+  radio.readData(encryptedBuffer, 16);
 
   PacketData rcvdPacket;
 
-  if (radio.getPacketLength() != sizeof(PacketData)) return;
-
-  radio.readData((uint8_t*)&rcvdPacket, sizeof(PacketData));
+  int res = esp_aes_crypt_cbc(
+    &aesContext, 
+    MBEDTLS_AES_DECRYPT,
+    16, 
+    aesIV,
+    encryptedBuffer,
+    (uint8_t*)&rcvdPacket
+  );
 
   recievedPackets.push_back(rcvdPacket);
 
