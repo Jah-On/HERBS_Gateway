@@ -2,19 +2,23 @@
 // Otherwise it will print useful info over serial
 #define DEBUG 
 
+// HERBS Data Types
+#include "herbsTypes.h"
+
 // STL Includes
 #include <chrono>        // Time related
 #include <list>          // Front/Back optimized lists
+#include <optional>
 #include <unordered_map> // Performant hash table
 
 // Arduino Includes
-#include <float16.h>
 #include <timers.h>
 
 // External Includes
 #include <arduino-timer.h>
+#include <ChaChaPoly.h>
+#include <Crypto.h>
 #include <heltec_unofficial.h>
-#include <mbedtls/aes.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
 
@@ -43,23 +47,11 @@
 #define LORA_CODING_RATE_4_7     7
 #define LORA_CODING_RATE_4_8     8
 
-void createUuidFromU64(uint64_t raw);
-
 using namespace std;
 
-typedef struct PacketData {
-  uint64_t id;
-  uint8_t  packetNumber;
-  int8_t   temperature;  // Celcius
-  uint8_t  humidity;     // Percentage from 0 to 100
-  uint16_t preassure;    // Millibars
-  float16  acoustics;    // Decibels
-  uint16_t hiveMass;     // Grams
-} PacketData;
+std::unordered_map<uint64_t, ChaChaPoly> nodeEncryption;
 
-const size_t packetSize = sizeof(PacketData);
-
-std::list<PacketData> recievedPackets = {};
+std::list<std::pair<uint8_t, Packet>> recievedPackets = {};
 
 size_t valid = 0;
 size_t packets = 0;
@@ -68,16 +60,7 @@ WiFiClient client;
 
 Timer<2, millis> timer;
 
-unordered_map<uint64_t, String> peerUuids = {};
-
-const unordered_map<uint8_t, char> U8_AS_CHAR = {
-  {0x00, '0'}, {0x01, '1'}, {0x02, '2'}, {0x03, '3'},
-  {0x04, '4'}, {0x05, '5'}, {0x06, '6'}, {0x07, '7'},
-  {0x08, '8'}, {0x09, '9'}, {0x0A, 'a'}, {0x0B, 'b'},
-  {0x0C, 'c'}, {0x0D, 'd'}, {0x0E, 'e'}, {0x0F, 'f'}
-};
-
-esp_aes_context aesContext;
+uint8_t tempBuffer[sizeof(DataPacket)];
 
 void setup() {
 
@@ -94,16 +77,23 @@ void setup() {
   display.setFont(ArialMT_Plain_16);
   display.display();
 
-  // Init AES
-  esp_aes_init(&aesContext);
-  if (esp_aes_setkey(&aesContext, AES_KEY, 128)){
-    Serial.println("could not set key!");
+  // Init encryption
+  for (auto node : knownMonitors){
+    nodeEncryption.insert({node.first, ChaChaPoly()});
+
+    if (!nodeEncryption[node.first].setKey(node.second.key, 16)){
+      throw("Could not set key!");
+    }
+    if (!nodeEncryption[node.first].setIV(node.second.iv, 8)){
+      throw("Could not set IV!");
+    }
   }
 
   // Init functions
   if (!LoRaInit()) {
     display.println("LoRa Failed");
     display.display();
+
     return;
   }
 
@@ -124,13 +114,15 @@ void setup() {
     wifiStatus = WiFi.status();
   }
 
+  radio.setPacketReceivedAction(onRecieve);
+  radio.startReceive();
+
   timer.every(1e2, updateDisplay);
 
-  radio.setPacketReceivedAction(onRecieve);
-
-  radio.startReceive();
+  for (auto node : knownMonitors){
+    sendEventPacket(node.first, EventCode::NODE_ONLINE);
+  }
 }
-
 
 void loop() {
   timer.tick();
@@ -140,13 +132,29 @@ void loop() {
     return;
   }
 
-  PacketData packet = recievedPackets.front();
+  uint8_t packetSize = recievedPackets.front().first;
+  Packet& packet     = recievedPackets.front().second;
 
-  Serial.printf("Got packet: %d\n", packet.packetNumber);
+  if (!knownMonitors.contains(packet.id)){
 
-  if (!peerUuids.contains(packet.id)){
-    createUuidFromU64(packet.id);
+#ifdef DEBUG
+    Serial.printf("Unknown packet node: %llx.\n", packet.id);
+#endif
+
+    recievedPackets.pop_front();
+    return;
   }
+
+  switch (packetSize) {
+  case sizeof(DataPacket):
+    handleDataPacket(packet);
+    break;
+  default:
+    handleEventPacket(packet);
+    break;
+  }
+
+  recievedPackets.pop_front();
 
   // client.connect(HTTP_HOST, HTTP_PORT);
 
@@ -189,12 +197,86 @@ void loop() {
   // client.printf("\"humidity\": %d,",    packet.humidity);
   // client.printf("\"preassure\": %d",    packet.preassure);
   // client.print("}");
+}
 
-  recievedPackets.pop_front();
+void handleDataPacket(Packet& packet){
+  nodeEncryption[packet.id].decrypt(
+    (uint8_t*)&packet.type, 
+    (uint8_t*)packet.type.encrypted, 
+    sizeof(DataPacket)
+  );
+
+  if (!nodeEncryption[packet.id].checkTag(packet.tag, tagSize)){
+
+#ifdef DEBUG
+    Serial.printf("Tag check failed for node %llx.\n", packet.id);
+#endif
+
+    return;
+  }
 
 #if defined(DEBUG)
-  Serial.printf("Temperature is %d\n", packet.temperature);
+  Serial.printf("Temperature is %d\n", packet.type.data.temperature);
 #endif
+
+  sendEventPacket(packet.id, EventCode::DATA_RECVED);
+
+  valid++;
+}
+
+void handleEventPacket(Packet& packet){
+  ChaChaPoly newCrypt;
+
+  if (!newCrypt.setKey(knownMonitors.at(packet.id).key, 16)){
+    throw("Could not set key!");
+  }
+  if (!newCrypt.setIV(knownMonitors.at(packet.id).iv, 8)){
+    throw("Could not set IV!");
+  }
+
+  newCrypt.decrypt(
+    (uint8_t*)&packet.type, 
+    (uint8_t*)packet.type.encrypted, 
+    sizeof(EventPacket)
+  ); 
+
+  if (!newCrypt.checkTag(packet.tag, tagSize)){
+
+#ifdef DEBUG
+    Serial.printf("Tag check failed for reset from %llx.\n", packet.id);
+#endif
+
+    return;
+  } 
+
+  nodeEncryption[packet.id].clear();
+  nodeEncryption[packet.id] = newCrypt;
+
+#ifdef DEBUG
+  Serial.printf("Node %" PRIx64 " back online!\n", packet.id);
+#endif
+}
+
+void sendEventPacket(uint64_t target, EventCode event){
+  Packet packet;
+
+  radio.clearPacketReceivedAction();
+
+  packet.id                   = target;
+  packet.type.event.eventCode = event;
+
+  nodeEncryption[target].encrypt(
+    packet.type.encrypted,
+    (uint8_t*)&packet.type,
+    sizeof(EventPacket)
+  );
+
+  nodeEncryption[target].computeTag(&packet.tag, tagSize);
+
+  radio.transmit((uint8_t*)&packet, eventPacketSize);
+
+  radio.setPacketReceivedAction(onRecieve);
+  radio.startReceive();
 }
 
 bool LoRaInit(){
@@ -222,42 +304,30 @@ bool updateDisplay(void* cbData){
 }
 
 void onRecieve(){
-  uint8_t encryptedBuffer[packetSize];
-
-  // if (radio.getPacketLength() != packetSize) return;
-
   packets++;
 
-  radio.readData(encryptedBuffer, 16);
+  uint8_t dump;
+  size_t  packetSize = radio.getPacketLength(true);
 
-  PacketData rcvdPacket;
+  switch (packetSize) {
+  case eventPacketSize:
+  case dataPacketSize:
+    recievedPackets.emplace_back();
+    break;
+  default:
 
-  int res = esp_aes_crypt_cbc(
-    &aesContext, 
-    MBEDTLS_AES_DECRYPT,
-    16, 
-    aesIV,
-    encryptedBuffer,
-    (uint8_t*)&rcvdPacket
-  );
+#ifdef DEBUG
+  Serial.printf("Invalid packet size of %d recieved.\n", packetSize);
+#endif
 
-  recievedPackets.push_back(rcvdPacket);
-
-  valid++;
-}
-
-void createUuidFromU64(uint64_t raw){
-  String uuid = "00000000-0000-0000-0000-000000000000";
-  size_t strIndex = 0;
-  for (int8_t bitIndex = 60; bitIndex >= 0; bitIndex -= 4){
-    switch (strIndex) {
-    case 8:
-    case 13:
-      strIndex++;
-    default:
-      break;
-    }
-    uuid[strIndex++] = U8_AS_CHAR.at((raw >> bitIndex) & 0xF);
+    radio.readData(&dump, 1);
+    return;
   }
-  peerUuids.insert({raw, uuid});
+
+  recievedPackets.back().first = packetSize - idSize - tagSize;
+
+  radio.readData(
+    (uint8_t*)&recievedPackets.back().second, 
+    packetSize
+  );
 }
