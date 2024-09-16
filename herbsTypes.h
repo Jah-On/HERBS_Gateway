@@ -17,7 +17,7 @@ typedef enum class EventCode : uint8_t {
 typedef struct DataPacket {
   int8_t   temperature;  // Celcius
   uint8_t  humidity;     // Percentage from 0 to 100
-  uint16_t preassure;    // Millibars
+  uint16_t pressure;    // Millibars
   float16  acoustics;    // Decibels
   uint16_t hiveMass;     // Grams
 } DataPacket;

@@ -183,7 +183,7 @@ void loop() {
   // }
 
   // len++;
-  // for (uint16_t comp = 10; comp < packet.preassure; comp *= 10){
+  // for (uint16_t comp = 10; comp < packet.pressure; comp *= 10){
   //   len++;
   // }
 
@@ -195,7 +195,7 @@ void loop() {
   // client.print("{");
   // client.printf("\"temperature\": %d,", packet.temperature);
   // client.printf("\"humidity\": %d,",    packet.humidity);
-  // client.printf("\"preassure\": %d",    packet.preassure);
+  // client.printf("\"pressure\": %d",     packet.pressure);
   // client.print("}");
 }
 
