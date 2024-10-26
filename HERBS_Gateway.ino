@@ -1,76 +1,50 @@
 // Comment out for actual use to save energy
 // Otherwise it will print useful info over serial
-#define DEBUG 
+// #define DEBUG 
 
-// HERBS Data Types
-#include "herbsTypes.h"
+// Secrets
+#include <include/Secrets.h>
+
+// LoRa constants
+#include <include/LoRa.h>
 
 // STL Includes
-#include <chrono>        // Time related
 #include <list>          // Front/Back optimized lists
-#include <optional>
 #include <unordered_map> // Performant hash table
 
-// Arduino Includes
-#include <timers.h>
-
 // External Includes
-#include <arduino-timer.h>
 #include <ChaChaPoly.h>
-#include <Crypto.h>
 #include <heltec_unofficial.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
 
-// Info that should not be public
-// Such as Wi-Fi SSID and passphrase
-#include "secrets.h"
+const char* JSON_FMT_STRING = "{\
+\"hive_temp\":%d,\
+\"extern_temp\":%d,\
+\"humidity\":%d,\
+\"pressure\":%d,\
+\"acoustics\":%d\
+}";
 
-// LoRa constants
-#define LORA_FREQUENCY_US        905.2
-
-#define LORA_BANDWIDTH_7_8       7.8
-#define LORA_BANDWIDTH_20_8      20.8
-#define LORA_BANDWIDTH_62_5      62.5
-
-#define LORA_SPREADING_FACTOR_5  5
-#define LORA_SPREADING_FACTOR_6  6
-#define LORA_SPREADING_FACTOR_7  7
-#define LORA_SPREADING_FACTOR_8  8
-#define LORA_SPREADING_FACTOR_9  9
-#define LORA_SPREADING_FACTOR_10 10
-#define LORA_SPREADING_FACTOR_11 11
-#define LORA_SPREADING_FACTOR_12 12
-
-#define LORA_CODING_RATE_4_5     5
-#define LORA_CODING_RATE_4_6     6
-#define LORA_CODING_RATE_4_7     7
-#define LORA_CODING_RATE_4_8     8
-
-using namespace std;
+char formattedJson[256];
 
 std::unordered_map<uint64_t, ChaChaPoly> nodeEncryption;
 
 std::list<std::pair<uint8_t, Packet>> recievedPackets = {};
 
-size_t valid = 0;
-size_t packets = 0;
-
 WiFiClient client;
-
-Timer<2, millis> timer;
 
 uint8_t tempBuffer[sizeof(DataPacket)];
 
 void setup() {
-
-#if defined(DEBUG)
-
+  #if defined(DEBUG)
   Serial.begin(115200);
-
-#endif
+  #endif
 
   heltec_setup();
+
+  pinMode(7, OUTPUT);
+  digitalWrite(7, HIGH);
 
   // Setup display
   display.clear();
@@ -81,21 +55,12 @@ void setup() {
   for (auto node : knownMonitors){
     nodeEncryption.insert({node.first, ChaChaPoly()});
 
-    if (!nodeEncryption[node.first].setKey(node.second.key, 16)){
-      throw("Could not set key!");
-    }
-    if (!nodeEncryption[node.first].setIV(node.second.iv, 8)){
-      throw("Could not set IV!");
-    }
+    if (!nodeEncryption[node.first].setKey(node.second.key, 16)) raiseError("Could not set key...");
+    if (!nodeEncryption[node.first].setIV( node.second.iv,   8)) raiseError("Could not set IV...");
   }
 
   // Init functions
-  if (!LoRaInit()) {
-    display.println("LoRa Failed");
-    display.display();
-
-    return;
-  }
+  if (!LoRaInit()) raiseError("LoRa setup failed...");
 
   heltec_delay(2000);
 
@@ -117,29 +82,23 @@ void setup() {
   radio.setPacketReceivedAction(onRecieve);
   radio.startReceive();
 
-  timer.every(1e2, updateDisplay);
-
   for (auto node : knownMonitors){
     sendEventPacket(node.first, EventCode::NODE_ONLINE);
   }
 }
 
 void loop() {
-  timer.tick();
+  heltec_delay(1);
 
-  if (recievedPackets.size() == 0){
-    heltec_delay(1);
-    return;
-  }
+  if (recievedPackets.size() == 0) return;
 
   uint8_t packetSize = recievedPackets.front().first;
   Packet& packet     = recievedPackets.front().second;
 
   if (!knownMonitors.contains(packet.id)){
-
-#ifdef DEBUG
-    Serial.printf("Unknown packet node: %llx.\n", packet.id);
-#endif
+    #ifdef DEBUG
+    Serial.printf("Unknown packet node: %" PRIx64 "\n", packet.id);
+    #endif
 
     recievedPackets.pop_front();
     return;
@@ -147,92 +106,74 @@ void loop() {
 
   switch (packetSize) {
   case sizeof(DataPacket):
-    handleDataPacket(packet);
+    if (!handleDataPacket(packet)) {
+      recievedPackets.pop_front();
+      return;
+    }
     break;
   default:
     handleEventPacket(packet);
-    break;
-  }
-
-  recievedPackets.pop_front();
-
-  // client.connect(HTTP_HOST, HTTP_PORT);
-
-  // client.printf("POST /%s HTTP/1.1\n", peerUuids.at(packet.id).c_str());
-
-  // client.printf("Host: %s\n", HTTP_HOST);
-  // client.println("Connection: close");
-
-  // size_t len = 43;
-
-  // len++;
-  // int8_t absValue;
-  // if (packet.temperature < 0){
-  //   len++;
-  //   absValue = -1 * packet.temperature;
-  // } else {
-  //   absValue = packet.temperature;
-  // }
-  // for (int8_t comp = 10; comp < absValue; comp *= 10){
-  //   len++;
-  // }
-
-  // len++;
-  // for (uint8_t comp = 10; comp < packet.humidity; comp *= 10){
-  //   len++;
-  // }
-
-  // len++;
-  // for (uint16_t comp = 10; comp < packet.pressure; comp *= 10){
-  //   len++;
-  // }
-
-  // client.print("Content-Length: ");
-  // client.println(len);
-  // client.println();
-
-  // // Send JSON to stream
-  // client.print("{");
-  // client.printf("\"temperature\": %d,", packet.temperature);
-  // client.printf("\"humidity\": %d,",    packet.humidity);
-  // client.printf("\"pressure\": %d",     packet.pressure);
-  // client.print("}");
-}
-
-void handleDataPacket(Packet& packet){
-  nodeEncryption[packet.id].decrypt(
-    (uint8_t*)&packet.type, 
-    (uint8_t*)packet.type.encrypted, 
-    sizeof(DataPacket)
-  );
-
-  if (!nodeEncryption[packet.id].checkTag(packet.tag, tagSize)){
-
-#ifdef DEBUG
-    Serial.printf("Tag check failed for node %llx.\n", packet.id);
-#endif
-
+    recievedPackets.pop_front();
     return;
   }
 
-#if defined(DEBUG)
-  Serial.printf("Temperature is %d\n", packet.type.data.temperature);
-#endif
+  client.connect(HTTP_HOST, HTTP_PORT);
+
+  client.printf(
+    "POST /%" PRIx64 " HTTP/1.1\nHost: %s:%d\nConnection: keep-alive\nKeep-Alive: timeout=600, max=1000\n", 
+    packet.id,
+    HTTP_HOST,
+    HTTP_PORT
+  );
+
+  // Send content length
+  client.printf(
+    "Content-Length: %d\n\n", 
+    snprintf(formattedJson, sizeof(formattedJson), JSON_FMT_STRING, 
+      packet.type.data.hive_temp,
+      packet.type.data.extern_temp,
+      packet.type.data.humidity,
+      packet.type.data.pressure,
+      packet.type.data.acoustics
+    )
+  );
+  
+  // Send JSON to stream
+  Serial.println(formattedJson);
+  client.println(formattedJson);
+
+  recievedPackets.pop_front();
+}
+
+bool handleDataPacket(Packet& packet){
+  nodeEncryption[packet.id].decrypt(
+    (uint8_t*)&packet.type, 
+    packet.type.encrypted, 
+    sizeof(DataPacket)
+  );
+
+  #ifdef DEBUG
+  Serial.printf("Checking tag for node %" PRIx64 ".\n", packet.id);
+  #endif
+
+  if (!nodeEncryption[packet.id].checkTag(packet.tag, tagSize)) return false;
+
+  #if defined(DEBUG)
+  Serial.println("Check passed.");
+  #endif
 
   sendEventPacket(packet.id, EventCode::DATA_RECVED);
 
-  valid++;
+  return true;
 }
 
 void handleEventPacket(Packet& packet){
   ChaChaPoly newCrypt;
 
-  if (!newCrypt.setKey(knownMonitors.at(packet.id).key, 16)){
-    throw("Could not set key!");
-  }
-  if (!newCrypt.setIV(knownMonitors.at(packet.id).iv, 8)){
-    throw("Could not set IV!");
-  }
+  if (!newCrypt.setKey(knownMonitors.at(packet.id).key, 16)) 
+    raiseError("Could not set key...");
+  if (!newCrypt.setIV( knownMonitors.at(packet.id).iv,   8)) 
+    raiseError("Could not set IV...");
 
   newCrypt.decrypt(
     (uint8_t*)&packet.type, 
@@ -240,21 +181,18 @@ void handleEventPacket(Packet& packet){
     sizeof(EventPacket)
   ); 
 
-  if (!newCrypt.checkTag(packet.tag, tagSize)){
+  #ifdef DEBUG
+  Serial.printf("Checking tag for reset from %." PRIx64 "\n", packet.id);
+  #endif
 
-#ifdef DEBUG
-    Serial.printf("Tag check failed for reset from %llx.\n", packet.id);
-#endif
-
-    return;
-  } 
+  if (!newCrypt.checkTag(packet.tag, tagSize)) return;
 
   nodeEncryption[packet.id].clear();
   nodeEncryption[packet.id] = newCrypt;
 
-#ifdef DEBUG
+  #ifdef DEBUG
   Serial.printf("Node %" PRIx64 " back online!\n", packet.id);
-#endif
+  #endif
 }
 
 void sendEventPacket(uint64_t target, EventCode event){
@@ -291,21 +229,7 @@ bool LoRaInit(){
   return res == 0;
 }
 
-bool updateDisplay(void* cbData){
-  display.clear();
-
-  display.drawString(0,  0, WiFi.localIP().toString());
-  display.drawString(0, 16, "Packets: " + String(packets));
-  display.drawString(0, 32, "Valid: " + String(valid));
-
-  display.display();
-
-  return true;
-}
-
 void onRecieve(){
-  packets++;
-
   uint8_t dump;
   size_t  packetSize = radio.getPacketLength(true);
 
@@ -315,10 +239,9 @@ void onRecieve(){
     recievedPackets.emplace_back();
     break;
   default:
-
-#ifdef DEBUG
-  Serial.printf("Invalid packet size of %d recieved.\n", packetSize);
-#endif
+    #ifdef DEBUG
+    Serial.printf("Invalid packet size of %d recieved.\n", packetSize);
+    #endif
 
     radio.readData(&dump, 1);
     return;
@@ -330,4 +253,13 @@ void onRecieve(){
     (uint8_t*)&recievedPackets.back().second, 
     packetSize
   );
+}
+
+void raiseError(String message){
+  display.println(message);
+  display.display();
+
+  heltec_delay(10e3);
+
+  throw("Critical error!");
 }

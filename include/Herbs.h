@@ -1,3 +1,5 @@
+#include <sys/_stdint.h>
+#include <cstdint>
 #ifndef HERBS_TYPES_H
 #define HERBS_TYPES_H
 
@@ -15,11 +17,11 @@ typedef enum class EventCode : uint8_t {
 } EventCode;
 
 typedef struct DataPacket {
-  int8_t   temperature;  // Celcius
-  uint8_t  humidity;     // Percentage from 0 to 100
-  uint16_t pressure;    // Millibars
-  float16  acoustics;    // Decibels
-  uint16_t hiveMass;     // Grams
+  int8_t   hive_temp   = 0; // Celcius
+  int8_t   extern_temp = 0; // Celcius
+  uint8_t  humidity    = 0; // Percentage from 0 to 100
+  uint16_t pressure    = 0; // Millibars
+  uint16_t acoustics   = 0; // Audio Level
 } DataPacket;
 
 typedef struct EventPacket {
@@ -36,7 +38,7 @@ typedef struct Packet {
   uint64_t id;
   uint8_t  tag[tagSize];
   union {
-    DataPacket   data = {};
+    DataPacket   data = {0};
     EventPacket  event;
     uint8_t      encrypted[sizeof(DataPacket)];
   } type;
