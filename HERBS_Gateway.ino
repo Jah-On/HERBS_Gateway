@@ -43,9 +43,6 @@ void setup() {
 
   heltec_setup();
 
-  pinMode(7, OUTPUT);
-  digitalWrite(7, HIGH);
-
   // Setup display
   display.clear();
   display.setFont(ArialMT_Plain_16);
@@ -139,7 +136,6 @@ void loop() {
   );
   
   // Send JSON to stream
-  Serial.println(formattedJson);
   client.println(formattedJson);
 
   recievedPackets.pop_front();
