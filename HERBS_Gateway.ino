@@ -1,6 +1,6 @@
 // Comment out for actual use to save energy
 // Otherwise it will print useful info over serial
-// #define DEBUG 
+#define DEBUG 
 
 // Secrets
 #include <include/Secrets.h>
@@ -36,10 +36,15 @@ WiFiClient client;
 
 uint8_t tempBuffer[sizeof(DataPacket)];
 
+uint16_t ledCounter = 1;
+int8_t   direction  = 1;
+
 void setup() {
   #if defined(DEBUG)
   Serial.begin(115200);
   #endif
+
+  pinMode(35, OUTPUT);
 
   heltec_setup();
 
@@ -86,6 +91,15 @@ void setup() {
 
 void loop() {
   heltec_delay(1);
+
+  switch (ledCounter) {
+  case 0:
+    digitalWrite(35, LOW);
+    break;
+  default:
+    --ledCounter;
+    break;
+  }
 
   if (recievedPackets.size() == 0) return;
 
@@ -242,6 +256,10 @@ void onRecieve(){
     radio.readData(&dump, 1);
     return;
   }
+
+  // Blink LED
+  ledCounter = 300;
+  digitalWrite(35, HIGH);
 
   recievedPackets.back().first = packetSize - idSize - tagSize;
 
