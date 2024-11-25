@@ -19,6 +19,7 @@
 #include <WiFiClient.h>
 
 const char* JSON_FMT_STRING = "{\
+\"battery\":%d,\
 \"hive_temp\":%d,\
 \"extern_temp\":%d,\
 \"humidity\":%d,\
@@ -141,6 +142,7 @@ void loop() {
   client.printf(
     "Content-Length: %d\n\n", 
     snprintf(formattedJson, sizeof(formattedJson), JSON_FMT_STRING, 
+      packet.type.data.battery,
       packet.type.data.hive_temp,
       packet.type.data.extern_temp,
       packet.type.data.humidity,
@@ -230,9 +232,9 @@ void sendEventPacket(uint64_t target, EventCode event){
 bool LoRaInit(){
   int16_t res = radio.begin(
     LORA_FREQUENCY_US,
-    LORA_BANDWIDTH_20_8,
-    LORA_SPREADING_FACTOR_5,
-    LORA_CODING_RATE_4_5
+    LORA_BANDWIDTH_125,
+    LORA_SPREADING_FACTOR_9,
+    LORA_CODING_RATE_4_8
   );
   radio.setRxBoostedGainMode(true);
 

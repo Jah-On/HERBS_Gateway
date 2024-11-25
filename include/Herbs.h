@@ -12,6 +12,7 @@ typedef enum class EventCode : uint8_t {
 } EventCode;
 
 typedef struct DataPacket {
+  uint8_t  battery     = 0; // Percentage from 0 to 100
   int8_t   hive_temp   = 0; // Celcius
   int8_t   extern_temp = 0; // Celcius
   uint8_t  humidity    = 0; // Percentage from 0 to 100
