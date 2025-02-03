@@ -18,6 +18,9 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 
+// ESP32 Includes
+#include <esp_sleep.h>
+
 const char* JSON_FMT_STRING = "{\
 \"battery\":%d,\
 \"hive_temp\":%d,\
@@ -37,8 +40,9 @@ WiFiClient client;
 
 uint8_t tempBuffer[sizeof(DataPacket)];
 
-uint16_t ledCounter = 1;
-int8_t   direction  = 1;
+uint16_t ledCounter  = 1;
+uint16_t pingCounter = 0;
+int8_t   direction   = 1;
 
 void setup() {
   #if defined(DEBUG)
@@ -67,20 +71,7 @@ void setup() {
 
   heltec_delay(2000);
 
-  int wifiStatus = WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE);
-
-  while (wifiStatus != WL_CONNECTED){
-    delay(1000);
-    switch (wifiStatus) {
-    case WL_CONNECT_FAILED:
-      display.println("WiFi Not Connected");
-      display.display();
-      break;
-    default:
-      break;
-    }
-    wifiStatus = WiFi.status();
-  }
+  WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE, 0, NULL, false);
 
   radio.setPacketReceivedAction(onRecieve);
   radio.startReceive();
@@ -88,10 +79,13 @@ void setup() {
   for (auto node : knownMonitors){
     sendEventPacket(node.first, EventCode::NODE_ONLINE);
   }
+
+  esp_sleep_enable_ulp_wakeup();
+  esp_sleep_enable_timer_wakeup(3400);
 }
 
 void loop() {
-  heltec_delay(1);
+  esp_light_sleep_start();
 
   switch (ledCounter) {
   case 0:
@@ -102,7 +96,19 @@ void loop() {
     break;
   }
 
-  if (recievedPackets.size() == 0) return;
+  switch (++pingCounter) {
+  case 17647:
+    putPing();
+    pingCounter = 0;
+    break;
+  default:
+    break;
+  }
+
+  switch (recievedPackets.size()) {
+  case 0:  return;
+  default: break;
+  }
 
   uint8_t packetSize = recievedPackets.front().first;
   Packet& packet     = recievedPackets.front().second;
@@ -129,30 +135,7 @@ void loop() {
     return;
   }
 
-  client.connect(HTTP_HOST, HTTP_PORT);
-
-  client.printf(
-    "POST /%" PRIx64 " HTTP/1.1\nHost: %s:%d\nConnection: keep-alive\nKeep-Alive: timeout=600, max=1000\n", 
-    packet.id,
-    HTTP_HOST,
-    HTTP_PORT
-  );
-
-  // Send content length
-  client.printf(
-    "Content-Length: %d\n\n", 
-    snprintf(formattedJson, sizeof(formattedJson), JSON_FMT_STRING, 
-      packet.type.data.battery,
-      packet.type.data.hive_temp,
-      packet.type.data.extern_temp,
-      packet.type.data.humidity,
-      packet.type.data.pressure,
-      packet.type.data.acoustics
-    )
-  );
-  
-  // Send JSON to stream
-  client.println(formattedJson);
+  postData(packet.id, packet.type.data);
 
   recievedPackets.pop_front();
 }
@@ -229,6 +212,70 @@ void sendEventPacket(uint64_t target, EventCode event){
   radio.startReceive();
 }
 
+void postData(uint64_t& monitorId, DataPacket& data){
+  while (!WiFi.reconnect()){
+    delay(1000);
+  }
+
+  client.connect(HTTP_HOST, HTTP_PORT);
+
+  client.printf(
+    "POST /%" PRIx64 " HTTP/1.1\nHost: %s:%d\nConnection: keep-alive\nKeep-Alive: timeout=600, max=1000\n", 
+    monitorId,
+    HTTP_HOST,
+    HTTP_PORT
+  );
+
+  // Send content length
+  client.printf(
+    "Content-Length: %d\n\n", 
+    snprintf(formattedJson, sizeof(formattedJson), JSON_FMT_STRING, 
+      data.battery,
+      data.hive_temp,
+      data.extern_temp,
+      data.humidity,
+      data.pressure,
+      data.acoustics
+    )
+  );
+  
+  // Send JSON to stream
+  client.println(formattedJson);
+
+  // Closes connection with the server
+  client.stop();
+
+  // Disconnects and sleeps Wi-Fi
+  WiFi.disconnect(true);
+}
+
+void putPing(){
+  while (!WiFi.reconnect()){
+    delay(1000);
+  }
+
+  client.connect(HTTP_HOST, HTTP_PORT);
+
+  client.printf(
+    "PUT /%s/ping HTTP/1.1\nHost: %s:%d\nConnection: keep-alive\nKeep-Alive: timeout=600, max=1000\n", 
+    HTTP_ACCESS_KEY,
+    HTTP_HOST,
+    HTTP_PORT
+  );
+
+  // Send content length
+  client.printf(
+    "Content-Length: %d\n\n", 
+    0
+  );
+  
+  // Closes connection with the server
+  client.stop();
+
+  // Disconnects and sleeps Wi-Fi
+  WiFi.disconnect(true);
+}
+
 bool LoRaInit(){
   int16_t res = radio.begin(
     LORA_FREQUENCY_US,
@@ -260,7 +307,7 @@ void onRecieve(){
   }
 
   // Blink LED
-  ledCounter = 300;
+  ledCounter = 88;
   digitalWrite(35, HIGH);
 
   recievedPackets.back().first = packetSize - idSize - tagSize;
