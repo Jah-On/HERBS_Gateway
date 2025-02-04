@@ -71,8 +71,6 @@ void setup() {
 
   heltec_delay(2000);
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE, 0, NULL, false);
-
   radio.setPacketReceivedAction(onRecieve);
   radio.startReceive();
 
@@ -82,6 +80,8 @@ void setup() {
 
   esp_sleep_enable_ulp_wakeup();
   esp_sleep_enable_timer_wakeup(3400);
+
+  putPing();
 }
 
 void loop() {
@@ -213,14 +213,22 @@ void sendEventPacket(uint64_t target, EventCode event){
 }
 
 void postData(uint64_t& monitorId, DataPacket& data){
-  while (!WiFi.reconnect()){
+  WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE);
+
+  while (WiFi.status() != WL_CONNECTED){
     delay(1000);
+    Serial.println("Wi-Fi not connected!");
   }
 
   client.connect(HTTP_HOST, HTTP_PORT);
 
+  while (!client.connected()){
+    delay(1000);
+    Serial.println("Not connected to server yet!");
+  }
+
   client.printf(
-    "POST /%" PRIx64 " HTTP/1.1\nHost: %s:%d\nConnection: keep-alive\nKeep-Alive: timeout=600, max=1000\n", 
+    "POST /%" PRIx64 " HTTP/1.1\nHost: %s:%d\n", 
     monitorId,
     HTTP_HOST,
     HTTP_PORT
@@ -242,6 +250,11 @@ void postData(uint64_t& monitorId, DataPacket& data){
   // Send JSON to stream
   client.println(formattedJson);
 
+  while (client.available() == 0){
+    delay(1000);
+    Serial.println("Awaiting response!");
+  }
+  
   // Closes connection with the server
   client.stop();
 
@@ -250,24 +263,31 @@ void postData(uint64_t& monitorId, DataPacket& data){
 }
 
 void putPing(){
-  while (!WiFi.reconnect()){
+  WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE);
+
+  while (WiFi.status() != WL_CONNECTED){
     delay(1000);
+    Serial.println("Wi-Fi not connected!");
   }
 
   client.connect(HTTP_HOST, HTTP_PORT);
 
+  while (!client.connected()){
+    delay(1000);
+    Serial.println("Not connected to server yet!");
+  }
+
   client.printf(
-    "PUT /%s/ping HTTP/1.1\nHost: %s:%d\nConnection: keep-alive\nKeep-Alive: timeout=600, max=1000\n", 
+    "PUT /%s/ping HTTP/1.1\nHost: %s:%d\Content-length: 0\r\n\n", // nConnection: keep-alive\nKeep-Alive: timeout=600, max=1000 
     HTTP_ACCESS_KEY,
     HTTP_HOST,
     HTTP_PORT
   );
 
-  // Send content length
-  client.printf(
-    "Content-Length: %d\n\n", 
-    0
-  );
+  while (client.available() == 0){
+    delay(1000);
+    Serial.println("Awaiting response!");
+  }
   
   // Closes connection with the server
   client.stop();
