@@ -7,6 +7,9 @@ Rename this file to Secrets.h after modifying!
 // HERBS Data Types
 #include <include/Herbs.h>
 
+#define TO_STRING(S)    _TO_STRING(S)
+#define _TO_STRING(val) #val
+
 #define WIFI_SSID       ""
 #define WIFI_PASSPHRASE ""
 #define HTTP_HOST       ""
