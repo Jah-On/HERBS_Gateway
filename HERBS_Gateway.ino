@@ -28,7 +28,18 @@ const char* JSON_FMT_STRING = "{\
 \"humidity\":%d,\
 \"pressure\":%d,\
 \"acoustics\":%d\
-}";
+}\r\n";
+
+const char DATA_POST_REQUEST[] = "\
+POST /" HTTP_ACCESS_KEY "/ping HTTP/1.1\n\
+Host:" HTTP_HOST ":" TO_STRING(HTTP_PORT)"\n\n"
+;
+
+const char PING_PUT_REQUEST[] = "\
+PUT /" HTTP_ACCESS_KEY "/ping HTTP/1.1\n\
+Host:" HTTP_HOST ":" TO_STRING(HTTP_PORT)"\n\
+Content-length: 0\r\n\n"
+;
 
 char formattedJson[256];
 
@@ -227,12 +238,7 @@ void postData(uint64_t& monitorId, DataPacket& data){
     Serial.println("Not connected to server yet!");
   }
 
-  client.printf(
-    "POST /%" PRIx64 " HTTP/1.1\nHost: %s:%d\n", 
-    monitorId,
-    HTTP_HOST,
-    HTTP_PORT
-  );
+  client.print(DATA_POST_REQUEST);
 
   // Send content length
   client.printf(
@@ -254,7 +260,10 @@ void postData(uint64_t& monitorId, DataPacket& data){
     delay(1000);
     Serial.println("Awaiting response!");
   }
-  
+
+  // Clear out data in stream buffer
+  client.flush();
+
   // Closes connection with the server
   client.stop();
 
@@ -277,17 +286,14 @@ void putPing(){
     Serial.println("Not connected to server yet!");
   }
 
-  client.printf(
-    "PUT /%s/ping HTTP/1.1\nHost: %s:%d\Content-length: 0\r\n\n", // nConnection: keep-alive\nKeep-Alive: timeout=600, max=1000 
-    HTTP_ACCESS_KEY,
-    HTTP_HOST,
-    HTTP_PORT
-  );
+  client.print(PING_PUT_REQUEST);
 
   while (client.available() == 0){
     delay(1000);
     Serial.println("Awaiting response!");
   }
+
+  client.flush();
   
   // Closes connection with the server
   client.stop();
