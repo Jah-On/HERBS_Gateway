@@ -28,11 +28,12 @@ const char* JSON_FMT_STRING = "{\
 \"humidity\":%d,\
 \"pressure\":%d,\
 \"acoustics\":%d\
-}\r\n";
+}\r\n\n";
 
 const char DATA_POST_REQUEST[] = "\
-POST /" HTTP_ACCESS_KEY "/ping HTTP/1.1\n\
-Host:" HTTP_HOST ":" TO_STRING(HTTP_PORT)"\n\n"
+POST /" HTTP_ACCESS_KEY "/%"PRIx64 " HTTP/1.1\n\
+Host:" HTTP_HOST ":" TO_STRING(HTTP_PORT)"\n\
+Content-Type: application/json\n"
 ;
 
 const char PING_PUT_REQUEST[] = "\
@@ -226,19 +227,25 @@ void sendEventPacket(uint64_t target, EventCode event){
 void postData(uint64_t& monitorId, DataPacket& data){
   WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE);
 
-  while (WiFi.status() != WL_CONNECTED){
+  delay(550);
+
+  for (uint8_t count = 0; count < 10; ++count){
+    if (WiFi.status() == WL_CONNECTED) break;
+
     delay(1000);
     Serial.println("Wi-Fi not connected!");
   }
 
   client.connect(HTTP_HOST, HTTP_PORT);
 
-  while (!client.connected()){
+  for (uint8_t count = 0; count < 10; ++count){
+    if (client.connected()) break;
+
     delay(1000);
     Serial.println("Not connected to server yet!");
   }
 
-  client.print(DATA_POST_REQUEST);
+  client.printf(DATA_POST_REQUEST, monitorId);
 
   // Send content length
   client.printf(
@@ -256,44 +263,58 @@ void postData(uint64_t& monitorId, DataPacket& data){
   // Send JSON to stream
   client.println(formattedJson);
 
-  while (client.available() == 0){
+  delay(100);
+
+  for (uint8_t count = 0; count < 10; ++count){
+    if (client.available()) break;
+
     delay(1000);
     Serial.println("Awaiting response!");
   }
 
   // Clear out data in stream buffer
-  client.flush();
+  client.clear();
 
   // Closes connection with the server
   client.stop();
 
   // Disconnects and sleeps Wi-Fi
   WiFi.disconnect(true);
+
+  memset(formattedJson, 0, sizeof(formattedJson));
 }
 
 void putPing(){
   WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE);
 
-  while (WiFi.status() != WL_CONNECTED){
+  delay(550);
+
+  for (uint8_t count = 0; count < 10; ++count){
+    if (WiFi.status() == WL_CONNECTED) break;
+
     delay(1000);
     Serial.println("Wi-Fi not connected!");
   }
 
   client.connect(HTTP_HOST, HTTP_PORT);
 
-  while (!client.connected()){
+  for (uint8_t count = 0; count < 10; ++count){
+    if (client.connected()) break;
+
     delay(1000);
     Serial.println("Not connected to server yet!");
   }
 
   client.print(PING_PUT_REQUEST);
 
-  while (client.available() == 0){
+  delay(100);
+
+  for (uint8_t count = 0; count < 10; ++count){
+    if (client.available()) break;
+
     delay(1000);
     Serial.println("Awaiting response!");
   }
-
-  client.flush();
   
   // Closes connection with the server
   client.stop();
