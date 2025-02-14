@@ -1,6 +1,6 @@
-// Comment out for actual use to save energy
-// Otherwise it will print useful info over serial
-#define DEBUG 
+#define FIRMWARE_VERSION "00.01.000"
+
+#define DEBUG
 
 // Secrets
 #include <include/Secrets.h>
@@ -16,59 +16,110 @@
 #include <ChaChaPoly.h>
 #include <heltec_unofficial.h>
 #include <WiFi.h>
-#include <WiFiClient.h>
+#include <WiFiClientSecure.h>
 
 // ESP32 Includes
+#include <esp_https_ota.h>
+#include <esp_ota_ops.h>
 #include <esp_sleep.h>
+#include <esp_timer.h>
 
-const char* JSON_FMT_STRING = "{\
+#define JSON_FMT_STRING "{\
 \"battery\":%d,\
 \"hive_temp\":%d,\
 \"extern_temp\":%d,\
 \"humidity\":%d,\
 \"pressure\":%d,\
 \"acoustics\":%d\
-}\r\n\n";
+}"
 
-const char DATA_POST_REQUEST[] = "\
-POST /" HTTP_ACCESS_KEY "/%"PRIx64 " HTTP/1.1\n\
-Host:" HTTP_HOST ":" TO_STRING(HTTP_PORT)"\n\
-Content-Type: application/json\n"
+#define DATAPACKET_FIELDS data.battery,\
+                          data.hive_temp,\
+                          data.extern_temp,\
+                          data.humidity,\
+                          data.pressure,\
+                          data.acoustics
+
+typedef enum CallbackFlags : uint32_t {
+  NONE                      = 0x00000000,
+  PING                      = 0x00000001,
+  CHECK_FOR_FIRMWARE_UPDATE = 0x00000002,
+  TURN_OFF_LED              = 0x00000004
+} CallbackFlags;
+
+void setCallbackFlag(void*);
+
+const char DATA_POST_REQUEST[] = 
+"POST /" APIARY_ID "/%" PRIx64 " HTTP/1.1\n"
+"Host:" HTTP_HOST ":" TO_STRING(HTTP_PORT)"\n"
+"Content-Type: application/json\n"
+"Content-Length: %d\n\n" 
+JSON_FMT_STRING "\r\n"
 ;
 
 const char PING_PUT_REQUEST[] = "\
-PUT /" HTTP_ACCESS_KEY "/ping HTTP/1.1\n\
-Host:" HTTP_HOST ":" TO_STRING(HTTP_PORT)"\n\
-Content-length: 0\r\n\n"
+PUT /" APIARY_ID "/ping HTTP/1.1\n\
+Host:" HTTP_HOST ":" TO_STRING(HTTP_PORT)"\n\r\n"
 ;
 
-char formattedJson[256];
+const char GATEWAY_FW_INFO[] = "\
+GET /gateway/firmware/info/" APIARY_ID "/" TO_STRING(GATEWAY_ID) " HTTP/1.1\n\
+Host:" HTTP_HOST ":" TO_STRING(HTTP_PORT)"\n\r\n"
+;
+
+const char GATEWAY_FW_UPDATE_URL[] = "\
+https://" HTTP_HOST ":" TO_STRING(HTTP_PORT)
+"/gateway/firmware/bin/" APIARY_ID "/" TO_STRING(GATEWAY_ID);
+
+const esp_http_client_config_t otaHttpConfig = {
+  .url = GATEWAY_FW_UPDATE_URL,
+  .cert_pem = CLIENT_CERT,
+};
+
+const esp_https_ota_config_t otaConfig = {
+  .http_config = &otaHttpConfig 
+};
 
 std::unordered_map<uint64_t, ChaChaPoly> nodeEncryption;
 
 std::list<std::pair<uint8_t, Packet>> recievedPackets = {};
 
-WiFiClient client;
+WiFiClientSecure client;
 
 uint8_t tempBuffer[sizeof(DataPacket)];
 
-uint16_t ledCounter  = 1;
-uint16_t pingCounter = 0;
-int8_t   direction   = 1;
+const esp_timer_create_args_t pingTimerCfg = {
+  .callback        = setCallbackFlag,
+  .arg             = (void*)CallbackFlags::PING,
+  .dispatch_method = ESP_TIMER_TASK,
+  .name            = "Server Ping Timer"
+};
+esp_timer_handle_t pingTimer;
+
+const esp_timer_create_args_t firmwareCheckTimerCfg = {
+  .callback        = setCallbackFlag,
+  .arg             = (void*)CallbackFlags::CHECK_FOR_FIRMWARE_UPDATE,
+  .dispatch_method = ESP_TIMER_TASK,
+  .name            = "Firmware Check Timer"
+};
+esp_timer_handle_t firmwareCheckTimer; 
+
+const esp_timer_create_args_t ledBlinkTimerCfg = {
+  .callback        = setCallbackFlag,
+  .arg             = (void*)CallbackFlags::TURN_OFF_LED,
+  .dispatch_method = ESP_TIMER_TASK,
+  .name            = "Firmware Check Timer"
+};
+esp_timer_handle_t ledBlinkTimer; 
+
+uint32_t cbFlags = CallbackFlags::NONE;
 
 void setup() {
-  #if defined(DEBUG)
-  Serial.begin(115200);
-  #endif
-
   pinMode(35, OUTPUT);
 
   heltec_setup();
 
-  // Setup display
-  display.clear();
-  display.setFont(ArialMT_Plain_16);
-  display.display();
+  client.setCACert(CLIENT_CERT);
 
   // Init encryption
   for (auto node : knownMonitors){
@@ -86,70 +137,71 @@ void setup() {
   radio.setPacketReceivedAction(onRecieve);
   radio.startReceive();
 
-  for (auto node : knownMonitors){
-    sendEventPacket(node.first, EventCode::NODE_ONLINE);
-  }
+  for (auto [id, key] : knownMonitors) sendEventPacket(id, EventCode::NODE_ONLINE);
 
   esp_sleep_enable_ulp_wakeup();
   esp_sleep_enable_timer_wakeup(3400);
+
+  esp_timer_create(&pingTimerCfg,          &pingTimer);
+  esp_timer_create(&firmwareCheckTimerCfg, &firmwareCheckTimer);
+  esp_timer_create(&ledBlinkTimerCfg,      &ledBlinkTimer);
+
+  esp_timer_start_periodic(pingTimer,           600e6);
+  esp_timer_start_periodic(firmwareCheckTimer, 1800e6);
 
   putPing();
 }
 
 void loop() {
-  esp_light_sleep_start();
+  while (recievedPackets.size()) {
+    uint8_t packetSize = recievedPackets.front().first;
+    Packet& packet     = recievedPackets.front().second;
 
-  switch (ledCounter) {
-  case 0:
-    digitalWrite(35, LOW);
-    break;
-  default:
-    --ledCounter;
-    break;
-  }
+    uint8_t notFound = 1;
+    for (const auto& [id, keys] : knownMonitors){
+      if (id != packet.id) continue;
 
-  switch (++pingCounter) {
-  case 17647:
-    putPing();
-    pingCounter = 0;
-    break;
-  default:
-    break;
-  }
+      --notFound;
+      break;
+    }
 
-  switch (recievedPackets.size()) {
-  case 0:  return;
-  default: break;
-  }
+    if (notFound) return recievedPackets.pop_front();
 
-  uint8_t packetSize = recievedPackets.front().first;
-  Packet& packet     = recievedPackets.front().second;
-
-  if (!knownMonitors.contains(packet.id)){
-    #ifdef DEBUG
-    Serial.printf("Unknown packet node: %" PRIx64 "\n", packet.id);
-    #endif
-
-    recievedPackets.pop_front();
-    return;
-  }
-
-  switch (packetSize) {
-  case sizeof(DataPacket):
-    if (!handleDataPacket(packet)) {
+    switch (packetSize) {
+    case sizeof(DataPacket):
+      if (!handleDataPacket(packet)) {
+        recievedPackets.pop_front();
+        return;
+      }
+      break;
+    default:
+      handleEventPacket(packet);
       recievedPackets.pop_front();
       return;
     }
-    break;
-  default:
-    handleEventPacket(packet);
+
+    postData(packet.id, packet.type.data);
+
     recievedPackets.pop_front();
-    return;
   }
 
-  postData(packet.id, packet.type.data);
+  switch (cbFlags) {
+  case NONE:
+    esp_light_sleep_start();
+    return;
+  default: break;
+  }
 
-  recievedPackets.pop_front();
+  if (cbFlags & TURN_OFF_LED){
+    cbFlags ^= TURN_OFF_LED;
+    digitalWrite(35, LOW);
+  } else if (cbFlags & PING){
+    cbFlags ^= PING;
+    putPing();
+  } else {
+    cbFlags ^= CHECK_FOR_FIRMWARE_UPDATE;
+    checkForFirmwareUpdate();
+  }
 }
 
 bool handleDataPacket(Packet& packet){
@@ -224,76 +276,91 @@ void sendEventPacket(uint64_t target, EventCode event){
   radio.startReceive();
 }
 
-void postData(uint64_t& monitorId, DataPacket& data){
-  WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE);
+void setCallbackFlag(void* cbFlag){
+  uint32_t asValue = (uint32_t)cbFlag;
 
-  delay(550);
+  cbFlags |= asValue;
+}
 
-  for (uint8_t count = 0; count < 10; ++count){
-    if (WiFi.status() == WL_CONNECTED) break;
-
-    delay(1000);
-    Serial.println("Wi-Fi not connected!");
-  }
-
-  client.connect(HTTP_HOST, HTTP_PORT);
-
-  for (uint8_t count = 0; count < 10; ++count){
-    if (client.connected()) break;
-
-    delay(1000);
-    Serial.println("Not connected to server yet!");
-  }
-
-  client.printf(DATA_POST_REQUEST, monitorId);
-
-  // Send content length
-  client.printf(
-    "Content-Length: %d\n\n", 
-    snprintf(formattedJson, sizeof(formattedJson), JSON_FMT_STRING, 
-      data.battery,
-      data.hive_temp,
-      data.extern_temp,
-      data.humidity,
-      data.pressure,
-      data.acoustics
-    )
-  );
-  
-  // Send JSON to stream
-  client.println(formattedJson);
-
-  delay(100);
+void checkForFirmwareUpdate(){
+  httpConnect();
+  client.print(GATEWAY_FW_INFO);
 
   for (uint8_t count = 0; count < 10; ++count){
     if (client.available()) break;
 
-    delay(1000);
-    Serial.println("Awaiting response!");
+    delay(100);
   }
 
-  // Clear out data in stream buffer
-  client.clear();
+  switch (client.available()) {
+    case 86: break;
+    default:
+      return disconnect();
+  }
 
-  // Closes connection with the server
+  uint8_t index = 0;
+  for (; index < 76; ++index) client.read();
+
+  for (index = 0; index < 9; ++index){
+    if (client.read() > FIRMWARE_VERSION[index]) break;
+  }
+
+  switch (index) {
+    case 9:  return disconnect();
+    default: break;
+  }
+
+  client.clear();
   client.stop();
 
-  // Disconnects and sleeps Wi-Fi
-  WiFi.disconnect(true);
+  esp_err_t otaStatus = esp_https_ota(&otaConfig);
+  if (otaStatus != ESP_OK) {
+    Serial.println("Updating failed...");
+    return;
+  }
 
-  memset(formattedJson, 0, sizeof(formattedJson));
+  esp_restart();
+}
+
+void postData(uint64_t& monitorId, DataPacket& data){
+  httpConnect();
+
+  client.printf(
+    DATA_POST_REQUEST, 
+    monitorId,
+    snprintf(NULL, 0, JSON_FMT_STRING, DATAPACKET_FIELDS),
+    DATAPACKET_FIELDS
+  );
+
+  for (uint8_t count = 0; count < 10; ++count){
+    if (client.available()) break;
+
+    delay(100);
+  }
+
+  disconnect();
 }
 
 void putPing(){
-  WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE);
+  httpConnect();
+  client.print(PING_PUT_REQUEST);
 
-  delay(550);
+  for (uint8_t count = 0; count < 10; ++count){
+    if (client.available()) break;
+
+    delay(100);
+  }
+
+  disconnect(); 
+}
+
+void httpConnect(){
+  WiFi.begin(WIFI_SSID, WIFI_PASSPHRASE);
 
   for (uint8_t count = 0; count < 10; ++count){
     if (WiFi.status() == WL_CONNECTED) break;
 
-    delay(1000);
-    Serial.println("Wi-Fi not connected!");
+    delay(300);
   }
 
   client.connect(HTTP_HOST, HTTP_PORT);
@@ -301,26 +368,9 @@ void putPing(){
   for (uint8_t count = 0; count < 10; ++count){
     if (client.connected()) break;
 
-    delay(1000);
-    Serial.println("Not connected to server yet!");
+    client.connect(HTTP_HOST, HTTP_PORT);
+    delay(10);
   }
-
-  client.print(PING_PUT_REQUEST);
-
-  delay(100);
-
-  for (uint8_t count = 0; count < 10; ++count){
-    if (client.available()) break;
-
-    delay(1000);
-    Serial.println("Awaiting response!");
-  }
-  
-  // Closes connection with the server
-  client.stop();
-
-  // Disconnects and sleeps Wi-Fi
-  WiFi.disconnect(true);
 }
 
 bool LoRaInit(){
@@ -345,17 +395,13 @@ void onRecieve(){
     recievedPackets.emplace_back();
     break;
   default:
-    #ifdef DEBUG
-    Serial.printf("Invalid packet size of %d recieved.\n", packetSize);
-    #endif
-
     radio.readData(&dump, 1);
     return;
   }
 
   // Blink LED
-  ledCounter = 88;
   digitalWrite(35, HIGH);
+  esp_timer_start_once(ledBlinkTimer, 300e3);
 
   recievedPackets.back().first = packetSize - idSize - tagSize;
 
@@ -366,10 +412,13 @@ void onRecieve(){
 }
 
 void raiseError(String message){
-  display.println(message);
-  display.display();
-
   heltec_delay(10e3);
 
   throw("Critical error!");
+}
+
+void disconnect(){
+  client.clear();
+  client.stop();
+  WiFi.disconnect(true);
 }
