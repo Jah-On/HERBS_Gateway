@@ -58,7 +58,7 @@ JSON_FMT_STRING "\r\n"
 ;
 
 const char PING_PUT_REQUEST[] = "\
-PUT /" APIARY_ID "/ping HTTP/1.1\n\
+PUT /gateway/ping/" APIARY_ID "/" TO_STRING(GATEWAY_ID) " HTTP/1.1\n\
 Host:" HTTP_HOST ":" TO_STRING(HTTP_PORT)"\n\r\n"
 ;
 
